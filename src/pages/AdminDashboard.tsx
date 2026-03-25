@@ -135,7 +135,7 @@ export type BatchImportRow = {
 };
 
 export default function AdminDashboard({ auth, onLogout, categories, onRefreshCategories }: AdminDashboardProps) {
-  const [activeTab, setActiveTab] = useState<"stats" | "products" | "add" | "categories" | "users">("stats");
+  const [activeTab, setActiveTab] = useState<"stats" | "products" | "add" | "categories" | "users" | "import">("stats");
   const [stats, setStats] = useState<Stats | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [adminUsers, setAdminUsers] = useState<any[]>([]);
@@ -188,6 +188,17 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
   };
 
   const closeModal = () => setModalConfig({ ...modalConfig, isOpen: false });
+
+  const detectStore = (url: string) => {
+    const lower = url.toLowerCase();
+    if (lower.includes('amazon') || lower.includes('amzn.')) return 'Amazon';
+    if (lower.includes('mercadolivre') || lower.includes('mercadolibre') || lower.includes('mlb-') || lower.includes('mlb')) return 'Mercado Livre';
+    if (lower.includes('shopee')) return 'Shopee';
+    if (lower.includes('magazineluiza') || lower.includes('magalu')) return 'Magalu';
+    if (lower.includes('aliexpress') || lower.includes('ali.')) return 'AliExpress';
+    if (lower.includes('casasbahia')) return 'Casas Bahia';
+    return 'Mercado Livre';
+  };
 
   const triggerSuccess = (message: string) => {
     setSuccessModal({ isOpen: true, message });
@@ -245,16 +256,30 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
         const data = XLSX.utils.sheet_to_json<any>(ws);
 
         const newQueue: BatchImportRow[] = data
-          .filter(row => row.link_pagina && row.link_afiliado)
-          .map((row) => ({
-            id: Math.random().toString(36).substring(7),
-            originalUrl: row.link_pagina.trim(),
-            affiliateUrl: row.link_afiliado.trim(),
-            status: 'pending'
-          }));
+          .map((row) => {
+            // Find columns by variation
+            const findCol = (vars: string[]) => {
+              const key = Object.keys(row).find(k => vars.some(v => k.toLowerCase().trim().replace(/_/g, ' ') === v.toLowerCase()));
+              return key ? row[key] : null;
+            };
+
+            const affUrl = findCol(['link afiliado', 'link de afiliado', 'affiliate url', 'url afiliado', 'link_afiliado', 'affiliate_link']);
+            const origUrl = findCol(['link pagina', 'link original', 'url pagina', 'pagina', 'original url', 'link_pagina', 'original_link', 'url', 'link']);
+
+            if (affUrl && origUrl) {
+              return {
+                id: Math.random().toString(36).substring(7),
+                originalUrl: String(origUrl).trim(),
+                affiliateUrl: String(affUrl).trim(),
+                status: 'pending' as const
+              };
+            }
+            return null;
+          })
+          .filter((row): row is any => row !== null);
 
         if (newQueue.length === 0) {
-          showAlert("Aviso", "A planilha não contém as colunas 'link_afiliado' e 'link_pagina' validas.");
+          showAlert("Aviso", "A planilha não contém colunas reconhecíveis para 'link afiliado' e 'link página'. Certifique-se de que os nomes das colunas estão corretos.");
         } else {
           setBatchQueue(prev => [...prev, ...newQueue]);
         }
@@ -297,9 +322,10 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Erro ao extrair");
 
-      if (!data.name || !data.price || !data.category_id || !data.subcategory_id) {
-        throw new Error("Dados incompletos");
+      if (!data.name) {
+        throw new Error("Dados incompletos (Nome não encontrado)");
       }
+
 
       setBatchQueue(prev => {
         const n = [...prev];
@@ -318,7 +344,7 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
             featured: 0,
             tag_label: "",
             tag_color: "",
-            link_afiliado: JSON.stringify([{ store: data.marketplace || "Principal", url: item.affiliateUrl }])
+            link_afiliado: JSON.stringify([{ store: detectStore(item.originalUrl), url: item.affiliateUrl || item.originalUrl }])
           }
         };
         return n;
@@ -359,6 +385,8 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
     if (itemsToPublish.length === 0) return;
 
     let successCount = 0;
+    const publishedIds = new Set<string>();
+
     for (const item of itemsToPublish) {
       try {
         const res = await fetch("/api/products", {
@@ -366,13 +394,30 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth.token}` },
           body: JSON.stringify(item.scrapedData)
         });
-        if (res.ok) successCount++;
-      } catch (e) { }
+        
+        if (res.ok) {
+          successCount++;
+          publishedIds.add(item.id);
+        } else {
+          // If server returns error, mark this specific item as error so it stays in queue
+          const data = await res.json();
+          setBatchQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'error', errorDetails: data.msg || data.error || 'Erro ao salvar' } : q));
+        }
+      } catch (e: any) {
+        setBatchQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'error', errorDetails: e.message || 'Falha de rede' } : q));
+      }
     }
+
     fetchProducts();
-    setBatchQueue(prev => prev.filter(i => i.status !== 'success'));
+    // Only remove items that were successfully published
+    setBatchQueue(prev => prev.filter(i => !publishedIds.has(i.id)));
     setSelectedBatchItemIds(new Set());
-    triggerSuccess(`MAGIA PURA! ${successCount} produtos foram para o ar com sucesso! 🚀`);
+    
+    if (successCount > 0) {
+      triggerSuccess(`MAGIA PURA! ${successCount} produtos foram para o ar com sucesso! 🚀`);
+    } else {
+      showAlert("Aviso", "Nenhum produto foi publicado. Verifique os erros na fila.");
+    }
   };
 
   const fetchUsers = async () => {
@@ -489,28 +534,18 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
         }
       }
 
+
       const definitiveUrl = importAffiliateUrl || importNormalUrl;
+      const storeName = detectStore(importNormalUrl || importAffiliateUrl);
+      
       const newLinks = [...(affiliateLinks.filter(l => l.url.trim() !== ""))];
       if (newLinks.length === 0) {
-        newLinks.push({ store: data.marketplace || "Principal", url: definitiveUrl });
+        newLinks.push({ store: storeName, url: definitiveUrl });
       } else {
         newLinks[0].url = definitiveUrl;
-        newLinks[0].store = data.marketplace || "Principal";
+        newLinks[0].store = storeName;
       }
       setAffiliateLinks(newLinks);
-
-      if (data.marketplace) {
-        setValue("tag_label", data.marketplace);
-        // Default colors for common marketplaces
-        const colors: Record<string, string> = {
-          'Amazon': '#f59e0b',
-          'Shopee': '#f97316',
-          'Mercado Livre': '#ef4444',
-          'AliExpress': '#ef4444',
-          'Magalu': '#3b82f6'
-        };
-        if (colors[data.marketplace]) setValue("tag_color", colors[data.marketplace]);
-      }
 
       setImportNormalUrl("");
       setImportAffiliateUrl("");
@@ -847,6 +882,27 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
               )}
             </AnimatePresence>
           </button>
+          <button
+            onClick={() => { setActiveTab("import"); setEditingProduct(null); setImportMode('batch'); }}
+            className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-all text-sm font-bold ${activeTab === "import" ? "bg-white/10 text-white" : "text-neutral-400 hover:text-white hover:bg-white/5"}`}
+            title={!isSidebarOpen ? "Importar Lote" : undefined}
+          >
+            <div className="shrink-0 flex items-center justify-center w-6">
+              <FileSpreadsheet className="w-5 h-5" />
+            </div>
+            <AnimatePresence>
+              {isSidebarOpen && (
+                <motion.span
+                  initial={{ opacity: 0, width: 0 }}
+                  animate={{ opacity: 1, width: "auto" }}
+                  exit={{ opacity: 0, width: 0 }}
+                  className="whitespace-nowrap overflow-hidden"
+                >
+                  Importar Planilha
+                </motion.span>
+              )}
+            </AnimatePresence>
+          </button>
         </nav>
 
         <div className="p-4 mt-auto border-t border-white/10">
@@ -902,6 +958,7 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
               {activeTab === "categories" && "Gerenciar Categorias"}
               {activeTab === "users" && "Controle de Acessos"}
               {activeTab === "add" && (editingProduct ? "Editar Produto" : "Adicionar Novo Produto")}
+              {activeTab === "import" && "Importação por Planilha"}
             </h1>
             <p className="text-neutral-500 mt-1">
               Bem-vindo de volta, {auth.user?.name}. Aqui está o que está acontecendo hoje.
@@ -1351,7 +1408,7 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -20 }}
-              className="w-full max-w-6xl mx-auto"
+              className="w-full"
             >
               <div className="bg-white rounded-3xl border border-neutral-200 p-6 md:p-8 space-y-8 shadow-sm">
 
@@ -1514,17 +1571,23 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
                         <div className="space-y-3">
                           {affiliateLinks.map((link, index) => (
                             <div key={index} className="flex items-center gap-2">
-                              <input
-                                type="text"
-                                placeholder="Nome da loja (ex: Amazon)"
+                              <select
                                 value={link.store}
                                 onChange={(e) => {
                                   const newLinks = [...affiliateLinks];
                                   newLinks[index].store = e.target.value;
                                   setAffiliateLinks(newLinks);
                                 }}
-                                className="w-1/3 bg-neutral-50 border border-neutral-200 rounded-xl py-3 px-4 focus:ring-2 focus:ring-brand/5 focus:border-brand transition-all text-sm outline-none"
-                              />
+                                className="w-1/3 bg-neutral-50 border border-neutral-200 rounded-xl py-3 px-4 focus:ring-2 focus:ring-brand/5 focus:border-brand transition-all text-sm outline-none cursor-pointer"
+                              >
+                                <option value="Principal">Principal</option>
+                                <option value="Mercado Livre">Mercado Livre</option>
+                                <option value="Amazon">Amazon</option>
+                                <option value="Shopee">Shopee</option>
+                                <option value="AliExpress">AliExpress</option>
+                                <option value="Magalu">Magalu</option>
+                                <option value="Casas Bahia">Casas Bahia</option>
+                              </select>
                               <input
                                 type="url"
                                 placeholder="https://..."
@@ -1532,6 +1595,7 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
                                 onChange={(e) => {
                                   const newLinks = [...affiliateLinks];
                                   newLinks[index].url = e.target.value;
+                                  newLinks[index].store = detectStore(e.target.value);
                                   setAffiliateLinks(newLinks);
                                 }}
                                 className="flex-1 bg-neutral-50 border border-neutral-200 rounded-xl py-3 px-4 focus:ring-2 focus:ring-brand/5 focus:border-brand transition-all text-sm outline-none"
@@ -1582,6 +1646,16 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
                           ))}
                         </select>
                       </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-bold text-neutral-400 uppercase tracking-widest ml-1">Palavras-Chave (Separadas por vírgula)</label>
+                      <textarea
+                        {...register("keywords")}
+                        placeholder="Ex: achado, promoção, cozinha, inox"
+                        rows={2}
+                        className="w-full bg-neutral-50 border border-neutral-200 rounded-xl py-3 px-4 focus:ring-2 focus:ring-brand/5 focus:border-brand transition-all text-sm outline-none resize-none"
+                      />
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1663,7 +1737,15 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
                       <div className="bg-neutral-50 p-6 rounded-3xl border border-neutral-200">
                         <div className="flex items-center justify-between mb-4">
                           <h4 className="font-bold text-neutral-800">Fila de Leitura</h4>
-                          <span className="text-xs font-black bg-neutral-200 text-neutral-600 px-3 py-1 rounded-full">{batchQueue.length}</span>
+                          <div className="flex items-center gap-2">
+                             <button 
+                                onClick={() => setBatchQueue([])} 
+                                className="text-[10px] font-bold text-red-500 hover:bg-red-50 px-2 py-1 rounded-lg transition-all"
+                             >
+                                Limpar Fila
+                             </button>
+                             <span className="text-xs font-black bg-neutral-200 text-neutral-600 px-3 py-1 rounded-full">{batchQueue.length}</span>
+                          </div>
                         </div>
 
                         <div className="space-y-3 max-h-[300px] overflow-y-auto pr-2 no-scrollbar">
@@ -1678,11 +1760,14 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
                                   <span className="font-black text-xs text-neutral-400 w-5">{idx + 1}</span>
                                   <span className="text-xs truncate text-neutral-500 max-w-[150px]" title={item.originalUrl}>{item.originalUrl}</span>
                                 </div>
-                                <div className="shrink-0 flex items-center">
+                                <div className="shrink-0 flex items-center gap-2">
                                   {item.status === 'pending' && <span className="bg-neutral-100 text-neutral-500 text-[10px] font-bold px-2 py-1 rounded lowercase">Aguardando</span>}
                                   {item.status === 'processing' && <span className="bg-brand/10 text-brand text-[10px] font-bold px-2 py-1 flex items-center gap-1 rounded uppercase tracking-wider"><Loader2 className="w-3 h-3 animate-spin" /> Extraindo</span>}
                                   {item.status === 'success' && <CheckCircle className="w-5 h-5 text-emerald-500" />}
                                   {item.status === 'error' && <XCircle className="w-5 h-5 text-red-500" title={item.errorDetails} />}
+                                  <button onClick={() => setBatchQueue(prev => prev.filter(p => p.id !== item.id))} className="p-1 text-neutral-300 hover:text-red-500 transition-colors">
+                                    <X className="w-4 h-4" />
+                                  </button>
                                 </div>
                               </div>
                             ))
@@ -1782,8 +1867,17 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
                           <div className="flex-1 min-w-0 pr-8">
                             <h5 className="font-bold text-sm text-neutral-900 line-clamp-2 leading-tight mb-1" title={item.scrapedData?.name}>{item.scrapedData?.name}</h5>
                             <div className="flex items-center gap-2">
-                              <p className="text-xs font-black text-brand">R$ {item.scrapedData?.price}</p>
-                              <span className="text-[10px] bg-neutral-100 text-neutral-500 px-1.5 py-0.5 rounded font-bold">{categories.find(c => c.id == item.scrapedData?.category_id)?.name || 'Sem cat'}</span>
+                              <p className="text-xs font-black text-brand">R$ {item.scrapedData?.price?.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                              <div className="flex flex-wrap gap-1">
+                                <span className="text-[9px] bg-neutral-100 text-neutral-500 px-1.5 py-0.5 rounded font-bold uppercase">
+                                  {categories.find(c => c.id == item.scrapedData?.category_id)?.name || 'Sem cat'}
+                                </span>
+                                {item.scrapedData?.subcategory_id && (
+                                  <span className="text-[9px] bg-brand/5 text-brand px-1.5 py-0.5 rounded font-bold uppercase">
+                                    {categories.find(c => c.id == item.scrapedData?.category_id)?.subcategories.find(s => s.id == item.scrapedData?.subcategory_id)?.name}
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           </div>
                         </div>
@@ -1802,6 +1896,166 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
               </div>
               )}
             </div>
+            </motion.div>
+          )}
+
+          {activeTab === "import" && (
+            <motion.div
+              key="import"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="w-full"
+            >
+              <div className="bg-white rounded-3xl border border-neutral-200 p-6 md:p-8 space-y-8 shadow-sm">
+                <div className="border-b border-neutral-100 pb-6">
+                  <h2 className="text-xl font-black">Importação em Lote</h2>
+                  <p className="text-sm text-neutral-500 mt-1">
+                    Valide e importe produtos de forma automatizada por planilha.
+                  </p>
+                </div>
+                
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                  {/* Lado Esquerdo: Upload & Fila */}
+                  <div className="space-y-6">
+                    <div className="flex flex-col items-center justify-center p-8 bg-brand/5 border-2 border-dashed border-brand/20 rounded-3xl text-center">
+                      <FileSpreadsheet className="w-12 h-12 text-brand mb-4" />
+                      <h3 className="text-lg font-black text-brand mb-2">Subir Produtos em Lote</h3>
+                      <p className="text-sm text-neutral-600 mb-6 max-w-sm mx-auto">
+                        Envie uma planilha XLSX com as colunas <strong className="font-bold">link_afiliado</strong> e <strong className="font-bold">link_pagina</strong>.
+                      </p>
+                      <label className="bg-brand text-white px-8 py-3.5 flex items-center gap-2 rounded-xl font-bold text-sm cursor-pointer hover:bg-brand/90 transition-all shadow-lg active:scale-95 shadow-brand/20">
+                        <UploadCloud className="w-5 h-5" />
+                        Selecionar Planilha
+                        <input type="file" accept=".xlsx, .xls" className="hidden" onChange={handleFileUpload} />
+                      </label>
+                      <button type="button" onClick={downloadTemplate} className="mt-4 text-xs font-bold text-neutral-500 hover:text-brand transition-colors">
+                        ⬇ Baixar arquivo modelo (.xlsx)
+                      </button>
+                    </div>
+
+                    <div className="bg-neutral-50 p-6 rounded-3xl border border-neutral-200">
+                      <div className="flex items-center justify-between mb-4">
+                        <h4 className="font-bold text-neutral-800">Fila de Leitura</h4>
+                        <div className="flex items-center gap-2">
+                           <button 
+                              onClick={() => setBatchQueue([])} 
+                              className="text-[10px] font-bold text-red-500 hover:bg-red-50 px-2 py-1 rounded-lg transition-all"
+                           >
+                              Limpar Fila
+                           </button>
+                           <span className="text-xs font-black bg-neutral-200 text-neutral-600 px-3 py-1 rounded-full">{batchQueue.length}</span>
+                        </div>
+                      </div>
+
+                      <div className="space-y-3 max-h-[300px] overflow-y-auto pr-2 no-scrollbar">
+                        {batchQueue.length === 0 ? (
+                          <div className="text-center py-8 text-neutral-400 text-sm font-medium border-2 border-dashed border-neutral-200 rounded-2xl">
+                            Nenhum arquivo processado.
+                          </div>
+                        ) : (
+                          batchQueue.map((item, idx) => (
+                            <div key={item.id} className="flex items-center justify-between p-3.5 bg-white border border-neutral-200 rounded-xl">
+                              <div className="flex items-center gap-3 overflow-hidden">
+                                <span className="font-black text-xs text-neutral-400 w-5">{idx + 1}</span>
+                                <span className="text-xs truncate text-neutral-500 max-w-[150px]" title={item.originalUrl}>{item.originalUrl}</span>
+                              </div>
+                              <div className="shrink-0 flex items-center gap-2">
+                                {item.status === 'pending' && <span className="bg-neutral-100 text-neutral-500 text-[10px] font-bold px-2 py-1 rounded lowercase">Aguardando</span>}
+                                {item.status === 'processing' && <span className="bg-brand/10 text-brand text-[10px] font-bold px-2 py-1 flex items-center gap-1 rounded uppercase tracking-wider"><Loader2 className="w-3 h-3 animate-spin" /> Extraindo</span>}
+                                {item.status === 'success' && <CheckCircle className="w-5 h-5 text-emerald-500" />}
+                                {item.status === 'error' && <XCircle className="w-5 h-5 text-red-500" title={item.errorDetails} />}
+                                <button onClick={() => setBatchQueue(prev => prev.filter(p => p.id !== item.id))} className="p-1 text-neutral-300 hover:text-red-500 transition-colors">
+                                  <X className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      {batchQueue.length > 0 && batchQueue.some(i => i.status === 'pending') && (
+                        <button
+                          type="button"
+                          onClick={() => setIsBatchProcessing(!isBatchProcessing)}
+                          className={`w-full mt-4 flex items-center justify-center gap-2 py-3.5 rounded-xl font-bold text-sm transition-all shadow-lg active:scale-95 ${isBatchProcessing ? "bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/20" : "bg-brand hover:bg-brand/90 text-white shadow-brand/20"}`}
+                        >
+                          {isBatchProcessing ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Zap className="w-4 h-4" />}
+                          {isBatchProcessing ? "Pausar Leitura" : "Iniciar Importação Mágica"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Lado Direito: Validação */}
+                  <div className="bg-neutral-50 rounded-3xl p-6 border border-neutral-200 flex flex-col h-full">
+                    <div className="flex items-start justify-between mb-6">
+                      <div>
+                        <h3 className="font-black text-neutral-800 text-lg">Fila de Aprovação ({batchQueue.filter(i => i.status === 'success').length})</h3>
+                        <p className="text-xs text-neutral-500 mt-1 max-w-[200px]">Valide e mande para a loja se tudo estiver correto.</p>
+                      </div>
+                      {selectedBatchItemIds.size > 0 && (
+                        <button
+                          onClick={removeBatchItems}
+                          className="bg-red-100 hover:bg-red-200 text-red-600 px-3 py-1.5 rounded-lg flex items-center gap-1.5 text-xs font-bold transition-all"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" /> Excluir ({selectedBatchItemIds.size})
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto no-scrollbar space-y-4 min-h-[400px] mb-4">
+                      {batchQueue.filter(i => i.status === 'success').length === 0 ? (
+                        <div className="h-full min-h-[300px] flex flex-col items-center justify-center text-center">
+                          <div className="w-16 h-16 bg-white border border-neutral-200 rounded-full flex items-center justify-center mb-4 opacity-50">
+                            <CheckCircle className="w-8 h-8 text-neutral-300" />
+                          </div>
+                          <p className="text-sm font-medium text-neutral-400">Os produtos que derem<br />sucesso aparecerão aqui.</p>
+                        </div>
+                      ) : (
+                        batchQueue.filter(i => i.status === 'success').map((item) => (
+                          <div key={item.id} className="relative bg-white border border-neutral-200 p-4 rounded-2xl flex items-start gap-3 group shadow-sm">
+                            <input
+                              type="checkbox"
+                              checked={selectedBatchItemIds.has(item.id)}
+                              onChange={(e) => {
+                                const newSet = new Set(selectedBatchItemIds);
+                                if (e.target.checked) newSet.add(item.id); else newSet.delete(item.id);
+                                setSelectedBatchItemIds(newSet);
+                              }}
+                              className="mt-1.5 rounded text-brand focus:ring-brand flex-shrink-0"
+                            />
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setEditingBatchItem(item); }}
+                              className="absolute top-2 right-2 p-1.5 text-neutral-400 hover:text-brand hover:bg-neutral-100 rounded-lg transition-all"
+                              title="Editar item"
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </button>
+                            <div className="w-14 h-14 shrink-0 bg-neutral-50 border border-neutral-100 rounded-xl overflow-hidden flex items-center justify-center">
+                              <img src={item.scrapedData?.image} className="w-full h-full object-contain p-1" />
+                            </div>
+                            <div className="flex-1 min-w-0 pr-8">
+                              <h5 className="font-bold text-sm text-neutral-900 line-clamp-2 leading-tight mb-1" title={item.scrapedData?.name}>{item.scrapedData?.name}</h5>
+                              <div className="flex items-center gap-2">
+                                <p className="text-xs font-black text-brand">R$ {item.scrapedData?.price?.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+
+                    <button
+                      onClick={publishBatchItems}
+                      disabled={batchQueue.filter(i => i.status === 'success').length === 0}
+                      className="w-full mt-auto bg-emerald-500 text-white font-black py-4 rounded-xl flex items-center justify-center gap-2 hover:bg-emerald-600 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-emerald-500/20"
+                    >
+                      <Save className="w-5 h-5" /> Publicar Todos
+                    </button>
+                  </div>
+                </div>
+              </div>
             </motion.div>
           )}
       </AnimatePresence>
@@ -1895,6 +2149,17 @@ export default function AdminDashboard({ auth, onLogout, categories, onRefreshCa
                   ))}
                 </select>
               </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-neutral-400 uppercase tracking-widest ml-1">Palavras-Chave (Separadas por vírgula)</label>
+              <textarea
+                value={editingBatchItem.scrapedData?.keywords || ""}
+                onChange={e => setEditingBatchItem({ ...editingBatchItem, scrapedData: { ...editingBatchItem.scrapedData, keywords: e.target.value } })}
+                placeholder="Ex: achado, promoção, cozinha, inox"
+                rows={2}
+                className="w-full bg-neutral-50 border border-neutral-200 rounded-xl py-3 px-4 focus:ring-2 focus:ring-brand/5 focus:border-brand transition-all text-sm outline-none resize-none"
+              />
             </div>
           </div>
           <div className="p-6 border-t border-neutral-100 flex items-center justify-end gap-3 z-10 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] bg-white">

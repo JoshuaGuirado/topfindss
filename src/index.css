@@ -1,0 +1,105 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --color-brand: #0f172a;
+}
+
+@layer base {
+  :root.dark body {
+    /* Background colors for neutral */
+    --color-neutral-50: #0a0a0a;
+    --color-neutral-100: #171717;
+    --color-neutral-200: #262626;
+    --color-neutral-300: #404040;
+
+    /* Text colors - highly readable white/gray */
+    --color-neutral-400: #a3a3a3;
+    --color-neutral-500: #e5e5e5;
+    --color-neutral-600: #f5f5f5;
+    --color-neutral-700: #fafafa;
+    --color-neutral-800: #ffffff;
+    --color-neutral-900: #ffffff;
+
+    --color-brand: #3b82f6;
+  }
+
+  /* Override specific utilities in dark mode without messing up text-white */
+  :root.dark .bg-white,
+  :root.dark .bg-neutral-50,
+  :root.dark .bg-neutral-100 {
+    background-color: var(--color-neutral-100) !important;
+    border-color: var(--color-neutral-200) !important;
+  }
+
+  :root.dark input,
+  :root.dark select,
+  :root.dark textarea {
+    background-color: #1a1a1a !important;
+    color: #ffffff !important;
+    border: 1px solid #333 !important;
+  }
+
+  :root.dark body {
+    color: #e5e5e5;
+  }
+
+  :root.dark h1,
+  :root.dark h2,
+  :root.dark h3,
+  :root.dark h4,
+  :root.dark h5,
+  :root.dark h6 {
+    color: #ffffff !important;
+  }
+
+  :root.dark .text-neutral-500,
+  :root.dark .text-neutral-600 {
+    color: #a3a3a3 !important;
+  }
+
+
+  body {
+    @apply antialiased text-neutral-900 bg-neutral-50 transition-colors duration-300;
+  }
+
+  /* Global Interactive Styles */
+  button, 
+  a, 
+  select,
+  input[type="submit"],
+  input[type="button"],
+  [role="button"],
+  .cursor-pointer {
+    cursor: pointer !important;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  button:hover,
+  a:hover,
+  [role="button"]:hover {
+    filter: brightness(1.1);
+    transform: translateY(-1px);
+  }
+
+  button:active,
+  a:active,
+  [role="button"]:active {
+    transform: scale(0.96) translateY(0);
+    filter: brightness(0.9);
+  }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
